@@ -1,4 +1,4 @@
 fastapi
 uvicorn
 pydantic
-python-dotenv
+python-dotenvpython-jose[cryptography]
