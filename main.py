@@ -13,7 +13,7 @@ app = FastAPI()
 # CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["https://grokbit-frontend-pua2ymczb-israel-richners-projects.vercel.app", "https://grokbit.ai", "*"],  # Add your Vercel URL, domain, and wildcard for testing
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
