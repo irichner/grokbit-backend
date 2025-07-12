@@ -1,4 +1,1 @@
-fastapi
-uvicorn
-pydantic
-python-dotenvpython-jose[cryptography]
+fastapi\nuvicorn\npydantic\npython-dotenv\nrequests\npython-jose[cryptography]
