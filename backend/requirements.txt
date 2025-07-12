@@ -1,1 +1,6 @@
 fastapi\nuvicorn\npydantic\npython-dotenv\nrequests\npython-jose[cryptography]
+uvicorn
+fastapi
+pydantic
+python-dotenv
+python-jose[cryptography]
