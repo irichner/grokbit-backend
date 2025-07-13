@@ -10,3 +10,4 @@ passlib[bcrypt]
 groq
 google-generativeai
 huggingface_hub
+python-multipart
