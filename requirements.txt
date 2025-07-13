@@ -3,4 +3,10 @@ uvicorn
 pydantic
 python-dotenv
 requests
+motor
+pymongo
 python-jose[cryptography]
+passlib[bcrypt]
+groq
+google-generativeai
+huggingface_hub
