@@ -57,7 +57,7 @@ async def get_insights(request: InsightRequest, current_user: dict = Depends(get
     payload = {
         "messages": [
             {"role": "system", "content": "You are a crypto market assistant."},
-            {"role": "user", "content": f"Provide a market insight for {request.coin} based on current trends"}
+            {"role": "user", "content": f"Provide a market insight for {request.coin} based on current trends in bullet points, keeping the response under 300 characters."}
         ],
         "model": "grok-3-latest",
         "stream": False,
