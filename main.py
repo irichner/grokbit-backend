@@ -148,6 +148,14 @@ async def get_portfolio(current_user: dict = Depends(get_current_user)):
     portfolio = await portfolios_collection.find_one({"user_id": str(current_user["_id"])})
     return {"portfolio": portfolio.get("items", []) if portfolio else []}
 
+@app.post("/portfolio/save")
+async def save_portfolio(request: PortfolioRequest, current_user: dict = Depends(get_current_user)):
+    if not request.portfolio:
+        raise HTTPException(status_code=400, detail="Portfolio required")
+    portfolio_dict = {"user_id": str(current_user["_id"]), "items": [item.dict() for item in request.portfolio], "updated_at": datetime.utcnow()}
+    await portfolios_collection.replace_one({"user_id": str(current_user["_id"])}, portfolio_dict, upsert=True)
+    return {"message": "Portfolio saved"}
+
 @app.post("/insights")
 async def get_insights(request: InsightRequest, current_user: dict = Depends(get_current_user)):
     if not request.coin:
@@ -195,7 +203,7 @@ async def get_portfolio_insight(request: PortfolioRequest, current_user: dict = 
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"API error: {str(e)}")
 
-# Preserve root
+# Preserve root endpoint
 @app.get("/")
 def read_root():
     return {"message": "Welcome to GrokBit API"}
