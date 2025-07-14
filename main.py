@@ -162,7 +162,7 @@ async def get_insights(request: InsightRequest, current_user: dict = Depends(get
     api_key = user_prefs["api_keys"].get(user_prefs["default_provider"])
     messages = [
         {"role": "system", "content": "You are a crypto market assistant."},
-        {"role": "user", "content": f"Provide a market insight for {request.coin} based on current trends in bullet points, keeping the response under 300 characters."}
+        {"role": "user", "content": f"Provide a market insight for {request.coin} based on current trends, keeping the response under 1000 characters."}
     ]
     try:
         insight = await call_ai(user_prefs["default_provider"], messages, api_key)
