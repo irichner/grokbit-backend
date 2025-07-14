@@ -1,3 +1,4 @@
+# main.py
 from fastapi import FastAPI, HTTPException, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -14,6 +15,7 @@ from typing import List, Optional, Dict
 from groq import Groq
 import google.generativeai as genai
 from huggingface_hub import InferenceClient
+from cryptography.fernet import Fernet, InvalidToken
 
 load_dotenv()
 
@@ -22,7 +24,7 @@ app = FastAPI()
 # CORS setup (preserved from current)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://grokbit-frontend-pua2ymczb-israel-richners-projects.vercel.app", "https://grokbit.ai", "*"],
+    allow_origins=["*"],  # Explicitly allow all for dev; tighten for prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -40,6 +42,11 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 HF_TOKEN = os.getenv("HF_TOKEN")
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")  # For JWT
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")  # For API key encryption; base64-encoded Fernet key
+if not ENCRYPTION_KEY:
+    raise ValueError("ENCRYPTION_KEY must be set in env")
+cipher = Fernet(ENCRYPTION_KEY.encode())
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -47,9 +54,11 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 class User(BaseModel):
+    first_name: str
+    last_name: str
     username: str
     hashed_password: str
-    preferences: Dict = {"default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}}
+    preferences: Dict = {"default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}, "prompts": []}
 
 class Token(BaseModel):
     access_token: str
@@ -78,6 +87,21 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     user = await users_collection.find_one({"username": username})
     if not user:
         raise credentials_exception
+    # Decrypt API keys on fetch
+    if "preferences" in user and "api_keys" in user["preferences"]:
+        decrypted_keys = {}
+        for provider, enc_key in user["preferences"]["api_keys"].items():
+            if enc_key:
+                try:
+                    decrypted_keys[provider] = cipher.decrypt(enc_key.encode()).decode()
+                except InvalidToken:
+                    decrypted_keys[provider] = ""  # Handle invalid/old keys gracefully
+            else:
+                decrypted_keys[provider] = ""
+        user["preferences"]["api_keys"] = decrypted_keys
+    # Ensure prompts is always a list
+    if "preferences" in user and "prompts" not in user["preferences"]:
+        user["preferences"]["prompts"] = []
     return user
 
 def create_access_token(data: dict):
@@ -124,11 +148,21 @@ async def call_ai(provider: str, messages: list, user_api_key: Optional[str] = N
     raise ValueError("Invalid provider")
 
 @app.post("/register")
-async def register(form_data: OAuth2PasswordRequestForm = Depends()):
-    if await users_collection.find_one({"username": form_data.username}):
+async def register(user_data: Dict = Body(...)):
+    first_name = user_data.get("first_name")
+    last_name = user_data.get("last_name")
+    username = user_data.get("username")
+    password = user_data.get("password")
+    if await users_collection.find_one({"username": username}):
         raise HTTPException(status_code=400, detail="Username already registered")
-    hashed_password = pwd_context.hash(form_data.password)
-    user_dict = {"username": form_data.username, "hashed_password": hashed_password, "preferences": {"default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}}}
+    hashed_password = pwd_context.hash(password)
+    user_dict = {
+        "first_name": first_name,
+        "last_name": last_name,
+        "username": username,
+        "hashed_password": hashed_password,
+        "preferences": {"default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}, "prompts": []}
+    }
     await users_collection.insert_one(user_dict)
     return {"message": "User registered"}
 
@@ -142,17 +176,36 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
 @app.post("/preferences")
 async def update_preferences(preferences: Dict = Body(...), current_user: dict = Depends(get_current_user)):
+    # Encrypt API keys before saving
+    encrypted_api_keys = {}
+    for provider, key in preferences.get("api_keys", {}).items():
+        if key:
+            encrypted_api_keys[provider] = cipher.encrypt(key.encode()).decode()
+        else:
+            encrypted_api_keys[provider] = ""
+    preferences["api_keys"] = encrypted_api_keys
+    # Ensure prompts is a list
+    if "prompts" not in preferences:
+        preferences["prompts"] = []
     await users_collection.update_one({"_id": ObjectId(current_user["_id"])}, {"$set": {"preferences": preferences}})
     return {"message": "Preferences updated"}
 
 @app.get("/preferences")
 async def get_preferences(current_user: dict = Depends(get_current_user)):
-    return current_user.get("preferences", {"default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}})
+    return current_user.get("preferences", {"default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}, "prompts": []})
 
 @app.get("/portfolio")
 async def get_portfolio(current_user: dict = Depends(get_current_user)):
     portfolio = await portfolios_collection.find_one({"user_id": str(current_user["_id"])})
     return {"portfolio": portfolio.get("items", []) if portfolio else []}
+
+@app.post("/portfolio/save")
+async def save_portfolio(request: PortfolioRequest, current_user: dict = Depends(get_current_user)):
+    if not request.portfolio:
+        return {"message": "Portfolio saved"}  # Empty is allowed
+    portfolio_dict = {"user_id": str(current_user["_id"]), "items": [item.dict() for item in request.portfolio], "updated_at": datetime.utcnow()}
+    await portfolios_collection.replace_one({"user_id": str(current_user["_id"])}, portfolio_dict, upsert=True)
+    return {"message": "Portfolio saved"}
 
 @app.post("/insights")
 async def get_insights(request: InsightRequest, current_user: dict = Depends(get_current_user)):
@@ -162,7 +215,7 @@ async def get_insights(request: InsightRequest, current_user: dict = Depends(get
     api_key = user_prefs["api_keys"].get(user_prefs["default_provider"])
     messages = [
         {"role": "system", "content": "You are a crypto market assistant."},
-        {"role": "user", "content": f"Provide a market insight for {request.coin} based on current trends, keeping the response under 1000 characters."}
+        {"role": "user", "content": request.coin}
     ]
     try:
         insight = await call_ai(user_prefs["default_provider"], messages, api_key)
@@ -193,7 +246,7 @@ async def get_portfolio_insight(request: PortfolioRequest, current_user: dict = 
     api_key = user_prefs["api_keys"].get(user_prefs["default_provider"])
     messages = [
         {"role": "system", "content": "You are a crypto portfolio advisor."},
-        {"role": "user", "content": f"{portfolio_str} Total value: ${total_value:.2f}. Provide a concise suggestion under 100 characters."}
+        {"role": "user", "content": f"{portfolio_str} Total value: ${total_value:.2f}. Provide a concise suggestion under 1000 characters."}
     ]
     try:
         suggestion = await call_ai(user_prefs["default_provider"], messages, api_key)
