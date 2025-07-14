@@ -43,6 +43,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 HF_TOKEN = os.getenv("HF_TOKEN")
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")  # For JWT
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")  # For API key encryption; base64-encoded Fernet key
+CRYPTO_RANK_API_KEY = os.getenv("CRYPTO_RANK_API_KEY")  # Optional for CryptoRank fallback
 if not ENCRYPTION_KEY:
     raise ValueError("ENCRYPTION_KEY must be set in env")
 cipher = Fernet(ENCRYPTION_KEY.encode())
@@ -53,12 +54,61 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
+COIN_ID_MAP = {}  # Global map for CoinGecko symbol to id
+
+@app.on_event("startup")
+async def startup_event():
+    global COIN_ID_MAP
+    try:
+        response = requests.get("https://api.coingecko.com/api/v3/coins/list")
+        response.raise_for_status()
+        COIN_ID_MAP = {item["symbol"].upper(): item["id"] for item in response.json()}
+    except Exception as e:
+        print(f"Failed to load CoinGecko coin list: {e}")
+
+async def get_price(coin: str) -> float:
+    coin_upper = coin.upper()
+    cg_id = COIN_ID_MAP.get(coin_upper)
+    if not cg_id:
+        return 0.0
+    try:
+        response = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd")
+        response.raise_for_status()
+        if response.status_code == 429:
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        data = response.json()
+        return data.get(cg_id, {}).get("usd", 0.0)
+    except Exception:
+        # Fallback to Binance
+        try:
+            response = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={coin_upper}USDT")
+            response.raise_for_status()
+            if response.status_code == 429:
+                raise HTTPException(status_code=429, detail="Rate limit exceeded")
+            data = response.json()
+            return float(data.get("price", 0.0))
+        except Exception:
+            # Fallback to CryptoRank (requires API key)
+            try:
+                if not CRYPTO_RANK_API_KEY:
+                    return 0.0
+                response = requests.get(f"https://api.cryptorank.io/v1/currencies?api_key={CRYPTO_RANK_API_KEY}&symbols={coin_upper}")
+                response.raise_for_status()
+                if response.status_code == 429:
+                    raise HTTPException(status_code=429, detail="Rate limit exceeded")
+                data = response.json().get("data", [])
+                if data:
+                    return data[0].get("values", {}).get("USD", {}).get("price", 0.0)
+                return 0.0
+            except Exception:
+                return 0.0
+
 class User(BaseModel):
     first_name: str
     last_name: str
     username: str
     hashed_password: str
-    preferences: Dict = {"default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}, "prompts": []}
+    preferences: Dict = {"default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}, "prompts": [], "portfolio_prompts": []}
 
 class Token(BaseModel):
     access_token: str
@@ -69,7 +119,8 @@ class InsightRequest(BaseModel):
 
 class PortfolioItem(BaseModel):
     coin: str
-    amount: float
+    quantity: float
+    cost_basis: float
 
 class PortfolioRequest(BaseModel):
     portfolio: List[PortfolioItem]
@@ -102,6 +153,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     # Ensure prompts is always a list
     if "preferences" in user and "prompts" not in user["preferences"]:
         user["preferences"]["prompts"] = []
+    if "preferences" in user and "portfolio_prompts" not in user["preferences"]:
+        user["preferences"]["portfolio_prompts"] = []
     return user
 
 def create_access_token(data: dict):
@@ -161,7 +214,7 @@ async def register(user_data: Dict = Body(...)):
         "last_name": last_name,
         "username": username,
         "hashed_password": hashed_password,
-        "preferences": {"default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}, "prompts": []}
+        "preferences": {"default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}, "prompts": [], "portfolio_prompts": []}
     }
     await users_collection.insert_one(user_dict)
     return {"message": "User registered"}
@@ -187,17 +240,29 @@ async def update_preferences(preferences: Dict = Body(...), current_user: dict =
     # Ensure prompts is a list
     if "prompts" not in preferences:
         preferences["prompts"] = []
+    if "portfolio_prompts" not in preferences:
+        preferences["portfolio_prompts"] = []
     await users_collection.update_one({"_id": ObjectId(current_user["_id"])}, {"$set": {"preferences": preferences}})
     return {"message": "Preferences updated"}
 
 @app.get("/preferences")
 async def get_preferences(current_user: dict = Depends(get_current_user)):
-    return current_user.get("preferences", {"default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}, "prompts": []})
+    return current_user.get("preferences", {"default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}, "prompts": [], "portfolio_prompts": []})
 
 @app.get("/portfolio")
 async def get_portfolio(current_user: dict = Depends(get_current_user)):
     portfolio = await portfolios_collection.find_one({"user_id": str(current_user["_id"])})
-    return {"portfolio": portfolio.get("items", []) if portfolio else []}
+    items = portfolio.get("items", []) if portfolio else []
+    # For backward compatibility, map old 'amount' to 'quantity' and set cost_basis to 0 if missing
+    updated_items = []
+    for item in items:
+        updated_item = {
+            "coin": item.get("coin", ""),
+            "quantity": item.get("quantity", item.get("amount", 0)),
+            "cost_basis": item.get("cost_basis", 0)
+        }
+        updated_items.append(updated_item)
+    return {"portfolio": updated_items}
 
 @app.post("/portfolio/save")
 async def save_portfolio(request: PortfolioRequest, current_user: dict = Depends(get_current_user)):
@@ -231,15 +296,14 @@ async def get_portfolio_insight(request: PortfolioRequest, current_user: dict = 
     portfolio_dict = {"user_id": str(current_user["_id"]), "items": [item.dict() for item in request.portfolio], "updated_at": datetime.utcnow()}
     await portfolios_collection.replace_one({"user_id": str(current_user["_id"])}, portfolio_dict, upsert=True)
     
-    # Calculate total_value (preserved from current)
-    coin_prices = {"BTC": 60000, "ETH": 3000}  # Example prices
-    total_value = 0
+    # Calculate total_value
+    total_value = 0.0
     portfolio_str = "Your portfolio: "
     for item in request.portfolio:
-        price = coin_prices.get(item.coin.upper(), 0)
-        value = price * item.amount
+        price = await get_price(item.coin)
+        value = price * item.quantity
         total_value += value
-        portfolio_str += f"{item.amount} {item.coin} (${value:.2f}), "
+        portfolio_str += f"{item.quantity} {item.coin} (${value:.2f}, cost basis ${item.cost_basis:.2f}), "
     portfolio_str = portfolio_str.rstrip(", ") + "."
 
     user_prefs = current_user.get("preferences", {"default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}})
@@ -253,6 +317,18 @@ async def get_portfolio_insight(request: PortfolioRequest, current_user: dict = 
         return {"total_value": total_value, "suggestion": suggestion}
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"API error: {str(e)}")
+
+@app.post("/prices")
+async def get_prices(request: Dict = Body(...), current_user: dict = Depends(get_current_user)):
+    coins = request.get("coins", [])
+    result = {}
+    for coin in coins:
+        result[coin] = await get_price(coin)
+    return result
+
+@app.get("/coins")
+async def get_coins(current_user: dict = Depends(get_current_user)):
+    return list(COIN_ID_MAP.keys())
 
 # Preserve root endpoint
 @app.get("/")
