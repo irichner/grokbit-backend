@@ -11,3 +11,5 @@ groq
 google-generativeai
 huggingface_hub
 python-multipart
+authlib
+itsdangerous
