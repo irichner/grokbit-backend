@@ -414,13 +414,14 @@ async def login(response: Response, request: Request, form_data: OAuth2PasswordR
     access_token = create_access_token({"sub": user["username"]})
     secure = os.getenv("ENV") == "prod" or not os.getenv("BACKEND_URL", "").startswith("http://localhost")
     response.set_cookie(
-        key="grokbit_token",
-        value=access_token,
-        httponly=True,
-        secure=secure,
-        samesite='lax',
-        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60
-    )
+    key="grokbit_token",
+    value=access_token,
+    httponly=True,
+    secure=secure,
+    samesite='lax',
+    max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    domain=".grokbit.ai"
+)
     logger.info(f"User logged in: {form_data.username}")
     return {"success": True}
 
@@ -527,7 +528,7 @@ async def logout(current_user: dict = Depends(get_current_user)):
                     pass
             except Exception as e:
                 logger.error(f"Failed to revoke {prov} token: {e}")
-    response.delete_cookie("grokbit_token")
+    response.delete_cookie("grokbit_token", domain=".grokbit.ai")
     logger.info(f"User logged out: {current_user['username']}")
     return response
 
