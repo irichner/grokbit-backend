@@ -202,6 +202,7 @@ class User(BaseModel):
     oauth_providers: Optional[Dict] = {}
     oauth_only: Optional[bool] = False
     tier: str = 'free'
+    profile_image: Optional[str] = ''
 
     @validator("username")
     def validate_username(cls, v):
@@ -388,7 +389,8 @@ async def register(request: Request, user_data: Dict = Body(...)):
         "preferences": default_prefs,
         "oauth_providers": {},
         "oauth_only": False,
-        "tier": "free"
+        "tier": "free",
+        "profile_image": ""
     }
     await users_collection.insert_one(user_dict)
     # Send verification email
@@ -455,6 +457,7 @@ async def oauth_callback(request: Request, provider: str):
         sub = user_info.get('id') or user_info.get('sub')
         email = user_info.get('email')
         name = user_info.get('name') or user_info.get('username', '')
+        profile_image = user_info.get('picture', '')
         if not sub:
             raise ValueError("No user ID from provider")
         if email and not re.match(r"[^@]+@[^@]+\.[^@]+", email):
@@ -495,7 +498,8 @@ async def oauth_callback(request: Request, provider: str):
             },
             "oauth_providers": {provider: {"sub": sub, "refresh_token": refresh_enc}},
             "oauth_only": True,
-            "tier": "free"
+            "tier": "free",
+            "profile_image": profile_image
         }
         insert_result = await users_collection.insert_one(new_user)
         user = await users_collection.find_one({"_id": insert_result.inserted_id})
@@ -896,9 +900,107 @@ async def stripe_webhook(request: Request):
         await users_collection.update_one({"_id": ObjectId(user_id)}, {"$set": {"tier": "premium"}})
     return {"success": True}
 
-@app.get("/user/tier")
-async def get_tier(current_user: dict = Depends(get_current_user)):
-    return {"tier": current_user.get("tier", "free")}
+@app.get("/user/profile")
+async def get_user_profile(current_user: dict = Depends(get_current_user)):
+    return {
+        "firstName": current_user.get("first_name", ""),
+        "lastName": current_user.get("last_name", ""),
+        "tier": current_user.get("tier", "free"),
+        "profileImage": current_user.get("profile_image", "")
+    }
+
+@app.get("/predictions")
+async def get_predictions(coin: str, current_user: dict = Depends(get_current_user)):
+    # Use AI to generate predictions, integrate tools if needed
+    messages = [{"role": "user", "content": f"Predict market for {coin}"}]
+    prediction = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    return {"predictions": [prediction]}
+
+@app.post("/recommendations")
+async def get_recommendations(request: Dict = Body(...), current_user: dict = Depends(get_current_user)):
+    risk = request.get("risk")
+    portfolio = request.get("portfolio")
+    # Generate recommendations
+    messages = [{"role": "user", "content": f"Recommend investments for {risk} risk with portfolio {portfolio}"}]
+    rec = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    return {"recommendations": [rec]}
+
+@app.post("/optimizations")
+async def get_optimizations(request: PortfolioRequest, current_user: dict = Depends(get_current_user)):
+    # Placeholder optimization
+    messages = [{"role": "user", "content": f"Optimize portfolio {request.portfolio}"}]
+    opt = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    return {"optimizations": [opt]}
+
+@app.get("/tutorials")
+async def get_tutorials(topic: str, current_user: dict = Depends(get_current_user)):
+    # Placeholder
+    messages = [{"role": "user", "content": f"Generate tutorial for {topic}"}]
+    tut = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    return {"tutorials": [tut]}
+
+@app.get("/nfts")
+async def get_nfts(coin: str, current_user: dict = Depends(get_current_user)):
+    # Placeholder
+    messages = [{"role": "user", "content": f"Value NFTs related to {coin}"}]
+    val = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    return {"valuations": [val]}
+
+@app.get("/defi")
+async def get_defi(coin: str, current_user: dict = Depends(get_current_user)):
+    # Placeholder
+    messages = [{"role": "user", "content": f"DeFi strategies for {coin}"}]
+    strat = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    return {"strategies": [strat]}
+
+@app.post("/query")
+async def get_query(request: Dict = Body(...), current_user: dict = Depends(get_current_user)):
+    query = request.get("query")
+    # Placeholder
+    messages = [{"role": "user", "content": query}]
+    res = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    return {"results": [res]}
+
+@app.post("/tax")
+async def get_tax(request: PortfolioRequest, current_user: dict = Depends(get_current_user)):
+    # Placeholder
+    messages = [{"role": "user", "content": f"Generate tax report for {request.portfolio}"}]
+    rep = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    return {"reports": [rep]}
+
+@app.get("/forum")
+async def get_forum(current_user: dict = Depends(get_current_user)):
+    # Placeholder, add collection if needed
+    return {"posts": []}
+
+@app.post("/forum")
+async def post_forum(request: Dict = Body(...), current_user: dict = Depends(get_current_user)):
+    # Placeholder
+    return {"success": True}
+
+@app.get("/risk")
+async def get_risk(token: str, current_user: dict = Depends(get_current_user)):
+    # Placeholder
+    messages = [{"role": "user", "content": f"Assess risk for {token}"}]
+    ass = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    return {"assessments": [ass]}
+
+@app.get("/charts")
+async def get_charts(coin: str, current_user: dict = Depends(get_current_user)):
+    # Placeholder
+    messages = [{"role": "user", "content": f"Analyze chart for {coin}"}]
+    ana = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    return {"analyses": [ana]}
+
+@app.get("/bots")
+async def get_bots(current_user: dict = Depends(get_current_user)):
+    # Placeholder
+    return {"configs": []}
+
+@app.get("/fraud")
+async def get_fraud(current_user: dict = Depends(get_current_user)):
+    # Placeholder
+    return {"alerts": []}
 
 @app.get("/")
 def read_root():
