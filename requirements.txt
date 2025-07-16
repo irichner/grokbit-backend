@@ -13,3 +13,11 @@ huggingface_hub
 python-multipart
 authlib
 itsdangerous
+slowapi
+cachetools
+stripe
+redis
+sendgrid
+pywebpush
+slowapi
+redis
