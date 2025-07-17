@@ -1,3 +1,4 @@
+# main.py
 import asyncio
 import logging
 import re
@@ -28,7 +29,6 @@ import secrets
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from cachetools import TTLCache
-import redis
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 from pywebpush import webpush, WebPushException
@@ -116,21 +116,28 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # Price cache
 price_cache = TTLCache(maxsize=100, ttl=60)
 
+# Sentiment cache
+sentiment_cache = TTLCache(maxsize=100, ttl=300)
+
 COIN_ID_MAP = {}
 KNOWN_IDS = {
     'BTC': 'bitcoin',
     'ETH': 'ethereum',
     'XRP': 'ripple',
+    'USDT': 'tether',
+    'BNB': 'bnb',
+    'SOL': 'solana',
 }
 
 DEFAULT_MODELS = {
     "Groq": os.getenv("DEFAULT_MODEL_GROQ", "llama-3.1-8b-instant"),
     "Gemini": os.getenv("DEFAULT_MODEL_GEMINI", "gemini-2.5-flash"),
     "HuggingFace": os.getenv("DEFAULT_MODEL_HF", "mistralai/Mistral-7B-Instruct-v0.3"),
-    "Grok": os.getenv("DEFAULT_MODEL_GROK", "grok-4-0709")
+    "Grok": os.getenv("DEFAULT_MODEL_GROK", "grok-3"),
+    "CoinGecko": "N/A"
 }
 
-providers_order = ["Groq", "Gemini", "HuggingFace", "Grok"]
+providers_order = ["Groq", "Gemini", "HuggingFace", "Grok", "CoinGecko"]
 
 @app.on_event("startup")
 async def startup_event():
@@ -139,12 +146,14 @@ async def startup_event():
         response = requests.get("https://api.coingecko.com/api/v3/coins/list")
         response.raise_for_status()
         COIN_ID_MAP = {item["symbol"].upper(): item["id"] for item in response.json()}
+        for symbol, id in KNOWN_IDS.items():
+            COIN_ID_MAP[symbol] = id
         logger.info("Successfully loaded CoinGecko coin list")
     except Exception as e:
         logger.error(f"Failed to load CoinGecko coin list: {e}")
     await create_indexes()
 
-async def get_price(coin: str) -> float:
+async def get_price(coin: str, coingecko_key: str = None) -> float:
     coin_upper = coin.upper()
     cache_key = coin_upper
     if cache_key in price_cache:
@@ -154,43 +163,47 @@ async def get_price(coin: str) -> float:
         logger.warning(f"No CoinGecko ID for coin: {coin_upper}")
         return 0.0
     try:
-        response = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd")
+        headers = {"x-cg-demo-api-key": coingecko_key} if coingecko_key else None
+        response = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd&include_24hr_change=true", headers=headers)
         response.raise_for_status()
         if response.status_code == 429:
             raise HTTPException(status_code=429, detail="Rate limit exceeded for CoinGecko API. Please try again later.")
         data = response.json()
         price = data.get(cg_id, {}).get("usd", 0.0)
-        price_cache[cache_key] = price
-        return price
+        change24h = data.get(cg_id, {}).get("usd_24h_change", 0.0)
+        price_cache[cache_key] = {'price': price, 'change24h': change24h}
+        return price_cache[cache_key]
     except Exception as e:
         logger.error(f"CoinGecko price fetch failed for {coin_upper}: {e}")
         try:
-            response = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={coin_upper}USDT")
+            response = requests.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={coin_upper}USDT")
             response.raise_for_status()
             if response.status_code == 429:
                 raise HTTPException(status_code=429, detail="Rate limit exceeded for Binance API. Please try again later.")
             data = response.json()
-            price = float(data.get("price", 0.0))
-            price_cache[cache_key] = price
-            return price
+            price = float(data.get("lastPrice", 0.0))
+            change24h = float(data.get("priceChangePercent", 0.0))
+            price_cache[cache_key] = {'price': price, 'change24h': change24h}
+            return price_cache[cache_key]
         except Exception as e:
             logger.error(f"Binance price fetch failed for {coin_upper}: {e}")
             CRYPTO_RANK_API_KEY = os.getenv("CRYPTO_RANK_API_KEY")
             if not CRYPTO_RANK_API_KEY:
                 logger.warning("CRYPTO_RANK_API_KEY is missing, skipping CryptoRank API")
-                return 0.0
+                return {'price': 0.0, 'change24h': 0.0}
             try:
                 response = requests.get(f"https://api.cryptorank.io/v1/currencies?api_key={CRYPTO_RANK_API_KEY}&symbols={coin_upper}")
                 response.raise_for_status()
                 data = response.json().get("data", [])
                 if data:
                     price = data[0].get("values", {}).get("USD", {}).get("price", 0.0)
-                    price_cache[cache_key] = price
-                    return price
-                return 0.0
+                    change24h = data[0].get("values", {}).get("USD", {}).get("percentChange24h", 0.0)
+                    price_cache[cache_key] = {'price': price, 'change24h': change24h}
+                    return price_cache[cache_key]
+                return {'price': 0.0, 'change24h': 0.0}
             except Exception as e:
                 logger.error(f"CryptoRank price fetch failed for {coin_upper}: {e}")
-                return 0.0
+                return {'price': 0.0, 'change24h': 0.0}
 
 class User(BaseModel):
     first_name: Optional[str] = None
@@ -198,7 +211,7 @@ class User(BaseModel):
     username: str
     hashed_password: Optional[str] = None
     email: Optional[str] = None
-    preferences: Dict = {"default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}, "prompts": [], "portfolio_prompts": [], "alert_prompts": [], "models": DEFAULT_MODELS}
+    preferences: Dict = {"prompt_default_provider": "Groq", "summary_default_provider": "Groq", "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": "", "CoinGecko": ""}, "prompts": [], "portfolio_prompts": [], "alert_prompts": [], "models": DEFAULT_MODELS, "refresh_rate": 60000, "market_coins": []}
     oauth_providers: Optional[Dict] = {}
     oauth_only: Optional[bool] = False
     tier: str = 'free'
@@ -312,6 +325,10 @@ async def get_current_user(grokbit_token: str = Cookie(None)):
         user["preferences"]["portfolio_prompts"] = user["preferences"].get("portfolio_prompts", [])
         user["preferences"]["alert_prompts"] = user["preferences"].get("alert_prompts", [])
         user["preferences"]["models"] = {**DEFAULT_MODELS, **user["preferences"].get("models", {})}
+        user["preferences"]["prompt_default_provider"] = user["preferences"].get("prompt_default_provider", "Groq")
+        user["preferences"]["summary_default_provider"] = user["preferences"].get("summary_default_provider", "Groq")
+        user["preferences"]["refresh_rate"] = user["preferences"].get("refresh_rate", 60000)
+        user["preferences"]["market_coins"] = user["preferences"].get("market_coins", [])
     return user
 
 def create_access_token(data: dict):
@@ -342,16 +359,27 @@ async def call_ai(provider: str, messages: list, user_api_key: Optional[str] = N
         url = "https://api.x.ai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         payload = {"messages": messages, "model": model, "stream": False, "temperature": 0}
-        max_retries = 3
+        max_retries = 5
         for attempt in range(max_retries):
             try:
-                response = requests.post(url, headers=headers, json=payload, timeout=20)
+                response = requests.post(url, headers=headers, json=payload, timeout=120)
                 response.raise_for_status()
                 data = response.json()
                 return data.get("choices", [{}])[0].get("message", {}).get("content", "No response")
             except requests.exceptions.RequestException as e:
+                logger.error(f"Grok API request error: {e}")
+                status_code = None
+                if hasattr(e, 'response') and e.response is not None:
+                    status_code = e.response.status_code
+                if status_code == 503:
+                    logger.error(f"Grok API 503 error: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(5)
+                        continue
+                    else:
+                        raise HTTPException(status_code=503, detail="Grok API unavailable after retries")
                 if attempt < max_retries - 1:
-                    time.sleep(3)
+                    time.sleep(5)
                     continue
                 else:
                     raise ValueError(f"Grok API request failed after {max_retries} attempts: {str(e)}")
@@ -369,12 +397,15 @@ async def register(request: Request, user_data: Dict = Body(...)):
     hashed_password = pwd_context.hash(password)
     irichner = await users_collection.find_one({"username": "irichner"})
     default_prefs = {
-        "default_provider": "Groq",
-        "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""},
+        "prompt_default_provider": "Groq",
+        "summary_default_provider": "Groq",
+        "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": "", "CoinGecko": ""},
         "prompts": [],
         "portfolio_prompts": [],
         "alert_prompts": [],
-        "models": DEFAULT_MODELS
+        "models": DEFAULT_MODELS,
+        "refresh_rate": 60000,
+        "market_coins": []
     }
     if irichner and "preferences" in irichner:
         prefs = irichner["preferences"]
@@ -489,12 +520,15 @@ async def oauth_callback(request: Request, provider: str):
             "first_name": name.split()[0] if name else "",
             "last_name": " ".join(name.split()[1:]) if name else "",
             "preferences": {
-                "default_provider": "Groq",
-                "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""},
+                "prompt_default_provider": "Groq",
+                "summary_default_provider": "Groq",
+                "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": "", "CoinGecko": ""},
                 "prompts": [],
                 "portfolio_prompts": [],
                 "alert_prompts": [],
-                "models": DEFAULT_MODELS
+                "models": DEFAULT_MODELS,
+                "refresh_rate": 60000,
+                "market_coins": []
             },
             "oauth_providers": {provider: {"sub": sub, "refresh_token": refresh_enc}},
             "oauth_only": True,
@@ -560,6 +594,14 @@ async def update_preferences(preferences: Dict = Body(...), current_user: dict =
     # Ensure models
     if "models" not in preferences:
         preferences["models"] = DEFAULT_MODELS
+    if "prompt_default_provider" not in preferences:
+        preferences["prompt_default_provider"] = "Groq"
+    if "summary_default_provider" not in preferences:
+        preferences["summary_default_provider"] = "Groq"
+    if "refresh_rate" not in preferences:
+        preferences["refresh_rate"] = 60000
+    if "market_coins" not in preferences:
+        preferences["market_coins"] = []
     await users_collection.update_one({"_id": ObjectId(current_user["_id"])}, {"$set": {"preferences": preferences}})
     logger.info(f"Preferences updated for user: {current_user['username']}")
     return {"message": "Preferences updated"}
@@ -567,12 +609,15 @@ async def update_preferences(preferences: Dict = Body(...), current_user: dict =
 @app.get("/preferences")
 async def get_preferences(current_user: dict = Depends(get_current_user)):
     prefs = current_user.get("preferences", {
-        "default_provider": "Groq",
-        "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""},
+        "prompt_default_provider": "Groq",
+        "summary_default_provider": "Groq",
+        "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": "", "CoinGecko": ""},
         "prompts": [],
         "portfolio_prompts": [],
         "alert_prompts": [],
-        "models": DEFAULT_MODELS
+        "models": DEFAULT_MODELS,
+        "refresh_rate": 60000,
+        "market_coins": []
     })
     # Ensure models
     prefs["models"] = {**DEFAULT_MODELS, **prefs.get("models", {})}
@@ -581,7 +626,7 @@ async def get_preferences(current_user: dict = Depends(get_current_user)):
 @app.get("/models")
 async def get_models(provider: str, current_user: dict = Depends(get_current_user)):
     api_key = current_user["preferences"]["api_keys"].get(provider)
-    if not api_key:
+    if not api_key and provider != "CoinGecko":
         raise HTTPException(status_code=400, detail=f"No API key for {provider}")
     models = []
     try:
@@ -604,6 +649,8 @@ async def get_models(provider: str, current_user: dict = Depends(get_current_use
             response.raise_for_status()
             data = response.json()
             models = [m["id"] for m in data.get("data", [])]
+        elif provider == "CoinGecko":
+            models = []
         else:
             raise HTTPException(status_code=400, detail="Unsupported provider")
     except Exception as e:
@@ -625,6 +672,11 @@ async def get_portfolio(current_user: dict = Depends(get_current_user)):
         updated_items.append(updated_item)
     return {"portfolio": updated_items}
 
+@app.get("/portfolio/history")
+async def get_portfolio_history(current_user: dict = Depends(get_current_user)):
+    # Placeholder for portfolio history; implement actual logic if needed
+    return []
+
 @app.post("/portfolio/save")
 async def save_portfolio(request: PortfolioRequest, current_user: dict = Depends(get_current_user)):
     if not request.portfolio:
@@ -643,17 +695,12 @@ async def get_insights(request: InsightRequest, current_user: dict = Depends(get
     if not request.coin:
         raise HTTPException(status_code=400, detail="Coin required")
     user_prefs = current_user.get("preferences", {
-        "default_provider": "Groq",
+        "prompt_default_provider": "Groq",
+        "summary_default_provider": "Groq",
         "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}
     })
-    default_provider = user_prefs["default_provider"]
-    configured_providers = [p for p in providers_order if user_prefs["api_keys"].get(p)]
     is_summary = request.coin.startswith("Summarize this user prompt in 3-4 words: ")
-    if len(configured_providers) > 1 and is_summary:
-        default_index = configured_providers.index(default_provider)
-        selected_provider = configured_providers[(default_index + 1) % len(configured_providers)]
-    else:
-        selected_provider = request.provider or default_provider
+    selected_provider = user_prefs["summary_default_provider"] if is_summary else user_prefs["prompt_default_provider"]
     api_key = user_prefs["api_keys"].get(selected_provider)
     model = user_prefs.get("models", {}).get(selected_provider)
     messages = [
@@ -681,24 +728,25 @@ async def get_portfolio_insight(request: PortfolioRequest, current_user: dict = 
     total_value = 0.0
     portfolio_str = "Your portfolio: "
     for item in request.portfolio:
-        price = await get_price(item.coin)
+        price_data = await get_price(item.coin)
+        price = price_data['price']
         value = price * item.quantity
         total_value += value
         portfolio_str += f"{item.quantity} {item.coin} (${value:.2f}, cost basis ${item.cost_basis:.2f}), "
     portfolio_str = portfolio_str.rstrip(", ") + "."
 
     user_prefs = current_user.get("preferences", {
-        "default_provider": "Groq",
+        "prompt_default_provider": "Groq",
         "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}
     })
-    api_key = user_prefs["api_keys"].get(user_prefs["default_provider"])
-    model = user_prefs.get("models", {}).get(user_prefs["default_provider"])
+    api_key = user_prefs["api_keys"].get(user_prefs["prompt_default_provider"])
+    model = user_prefs.get("models", {}).get(user_prefs["prompt_default_provider"])
     messages = [
         {"role": "system", "content": "You are a crypto portfolio advisor."},
         {"role": "user", "content": f"{portfolio_str} Total value: ${total_value:.2f}. Provide a concise suggestion under 1000 characters."}
     ]
     try:
-        suggestion = await call_ai(user_prefs["default_provider"], messages, api_key, model)
+        suggestion = await call_ai(user_prefs["prompt_default_provider"], messages, api_key, model)
         return {"total_value": total_value, "suggestion": suggestion}
     except Exception as e:
         logger.error(f"Portfolio insight call failed: {e}")
@@ -710,46 +758,50 @@ async def get_prices(request: Dict = Body(...), current_user: dict = Depends(get
     result = {}
     if not coins:
         return result
+    coingecko_key = current_user["preferences"]["api_keys"].get("CoinGecko")
 
     # Batch for CoinGecko
     try:
         cg_ids = [KNOWN_IDS.get(c.upper()) or COIN_ID_MAP.get(c.upper()) for c in coins if KNOWN_IDS.get(c.upper()) or COIN_ID_MAP.get(c.upper())]
         if cg_ids:
             ids_str = ','.join(cg_ids)
-            response = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={ids_str}&vs_currencies=usd")
+            headers = {"x-cg-demo-api-key": coingecko_key} if coingecko_key else None
+            response = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={ids_str}&vs_currencies=usd&include_24hr_change=true", headers=headers)
             response.raise_for_status()
             if response.status_code == 429:
                 raise HTTPException(status_code=429, detail="Rate limit exceeded for CoinGecko API. Please try again later.")
             data = response.json()
             for original_coin, cg_id in zip([c for c in coins if KNOWN_IDS.get(c.upper()) or COIN_ID_MAP.get(c.upper())], cg_ids):
                 price = data.get(cg_id, {}).get("usd", 0.0)
-                result[original_coin] = price
-                price_cache[original_coin.upper()] = price
+                change24h = data.get(cg_id, {}).get("usd_24h_change", 0.0)
+                result[original_coin] = {'price': price, 'change24h': change24h}
+                price_cache[original_coin.upper()] = result[original_coin]
     except Exception as e:
         logger.error(f"CoinGecko batch failed: {e}")
 
     # For missing prices, fallback to Binance batch
-    missing_coins = [c for c in coins if result.get(c, 0.0) == 0.0]
+    missing_coins = [c for c in coins if c not in result or result[c]['price'] == 0.0]
     if missing_coins:
         try:
             symbols = [c.upper() + 'USDT' for c in missing_coins]
             symbols_str = json.dumps(symbols)
-            response = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbols={symbols_str}")
+            response = requests.get(f"https://api.binance.com/api/v3/ticker/24hr?symbols={symbols_str}")
             response.raise_for_status()
             if response.status_code == 429:
                 raise HTTPException(status_code=429, detail="Rate limit exceeded for Binance API. Please try again later.")
             data = response.json()
             for item in data:
                 symbol = item.get('symbol', '')[:-4]  # Remove USDT
-                price = float(item.get('price', 0.0))
+                price = float(item.get('lastPrice', 0.0))
+                change24h = float(item.get('priceChangePercent', 0.0))
                 if symbol in [m.upper() for m in missing_coins]:
-                    result[symbol] = price
-                    price_cache[symbol] = price
+                    result[symbol] = {'price': price, 'change24h': change24h}
+                    price_cache[symbol] = result[symbol]
         except Exception as e:
             logger.error(f"Binance batch failed: {e}")
 
     # For still missing, fallback to CryptoRank batch
-    missing_coins = [c for c in coins if result.get(c, 0.0) == 0.0]
+    missing_coins = [c for c in coins if c not in result or result[c]['price'] == 0.0]
     if missing_coins:
         CRYPTO_RANK_API_KEY = os.getenv("CRYPTO_RANK_API_KEY")
         if not CRYPTO_RANK_API_KEY:
@@ -763,16 +815,17 @@ async def get_prices(request: Dict = Body(...), current_user: dict = Depends(get
                 for item in data:
                     symbol = item.get('symbol', '').upper()
                     price = item.get("values", {}).get("USD", {}).get("price", 0.0)
+                    change24h = item.get("values", {}).get("USD", {}).get("percentChange24h", 0.0)
                     if symbol in [m.upper() for m in missing_coins]:
-                        result[symbol] = price
-                        price_cache[symbol] = price
+                        result[symbol] = {'price': price, 'change24h': change24h}
+                        price_cache[symbol] = result[symbol]
             except Exception as e:
                 logger.error(f"CryptoRank batch failed: {e}")
 
     # If any still 0, fallback to per-coin get_price
     for coin in coins:
-        if result.get(coin, 0.0) == 0.0:
-            result[coin] = await get_price(coin)
+        if coin not in result or result[coin]['price'] == 0.0:
+            result[coin] = await get_price(coin, coingecko_key)
 
     return result
 
@@ -806,17 +859,17 @@ async def check_ai_alert(request: AlertCheckRequest, current_user: dict = Depend
     if not request.prompt:
         raise HTTPException(status_code=400, detail="Prompt required")
     user_prefs = current_user.get("preferences", {
-        "default_provider": "Groq",
+        "prompt_default_provider": "Groq",
         "api_keys": {"Groq": "", "Gemini": "", "HuggingFace": "", "Grok": ""}
     })
-    api_key = user_prefs["api_keys"].get(user_prefs["default_provider"])
-    model = user_prefs.get("models", {}).get(user_prefs["default_provider"])
+    api_key = user_prefs["api_keys"].get(user_prefs["prompt_default_provider"])
+    model = user_prefs.get("models", {}).get(user_prefs["prompt_default_provider"])
     messages = [
         {"role": "system", "content": "You are a creative crypto alert generator. Analyze current trends, sentiment, or anomalies. If significant change detected, start response with 'ALERT:' followed by witty, useful message with action suggestion. Else, respond 'No alert'."},
         {"role": "user", "content": request.prompt}
     ]
     try:
-        response = await call_ai(user_prefs["default_provider"], messages, api_key, model)
+        response = await call_ai(user_prefs["prompt_default_provider"], messages, api_key, model)
         if response.startswith("ALERT:"):
             await send_push(current_user["_id"], response)
             return {"alert": response}  # Triggered
@@ -841,16 +894,15 @@ async def delete_user(request: Request, delete_data: Dict = Body(...), current_u
 @app.get("/sentiment")
 async def get_sentiment(coin: str, current_user: dict = Depends(get_current_user)):
     cache_key = f"sentiment_{coin}"
-    cached = redis_client.get(cache_key)
-    if cached:
-        return json.loads(cached)
+    if cache_key in sentiment_cache:
+        return sentiment_cache[cache_key]
     # Placeholder for X search - integrate real X API if available
     tweets = []  # Replace with real fetch: e.g., tweets = x_keyword_search(query=f"{coin} sentiment", limit=20)
     sentiment_prompt = f"Analyze sentiment for {coin} from these tweets: {tweets}"
-    insight = await call_ai(current_user['preferences']['default_provider'], [{"role": "user", "content": sentiment_prompt}], current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    insight = await call_ai(current_user['preferences']['prompt_default_provider'], [{"role": "user", "content": sentiment_prompt}], current_user['preferences']['api_keys'][current_user['preferences']['prompt_default_provider']])
     score = 0.8  # Parse from insight
     result = {"score": score, "summary": insight}
-    redis_client.set(cache_key, json.dumps(result), ex=300)
+    sentiment_cache[cache_key] = result
     return result
 
 @app.post("/push/subscribe")
@@ -913,7 +965,7 @@ async def get_user_profile(current_user: dict = Depends(get_current_user)):
 async def get_predictions(coin: str, current_user: dict = Depends(get_current_user)):
     # Use AI to generate predictions, integrate tools if needed
     messages = [{"role": "user", "content": f"Predict market for {coin}"}]
-    prediction = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    prediction = await call_ai(current_user['preferences']['prompt_default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['prompt_default_provider']])
     return {"predictions": [prediction]}
 
 @app.post("/recommendations")
@@ -922,35 +974,35 @@ async def get_recommendations(request: Dict = Body(...), current_user: dict = De
     portfolio = request.get("portfolio")
     # Generate recommendations
     messages = [{"role": "user", "content": f"Recommend investments for {risk} risk with portfolio {portfolio}"}]
-    rec = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    rec = await call_ai(current_user['preferences']['prompt_default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['prompt_default_provider']])
     return {"recommendations": [rec]}
 
 @app.post("/optimizations")
 async def get_optimizations(request: PortfolioRequest, current_user: dict = Depends(get_current_user)):
     # Placeholder optimization
     messages = [{"role": "user", "content": f"Optimize portfolio {request.portfolio}"}]
-    opt = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    opt = await call_ai(current_user['preferences']['prompt_default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['prompt_default_provider']])
     return {"optimizations": [opt]}
 
 @app.get("/tutorials")
 async def get_tutorials(topic: str, current_user: dict = Depends(get_current_user)):
     # Placeholder
     messages = [{"role": "user", "content": f"Generate tutorial for {topic}"}]
-    tut = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    tut = await call_ai(current_user['preferences']['prompt_default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['prompt_default_provider']])
     return {"tutorials": [tut]}
 
 @app.get("/nfts")
 async def get_nfts(coin: str, current_user: dict = Depends(get_current_user)):
     # Placeholder
     messages = [{"role": "user", "content": f"Value NFTs related to {coin}"}]
-    val = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    val = await call_ai(current_user['preferences']['prompt_default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['prompt_default_provider']])
     return {"valuations": [val]}
 
 @app.get("/defi")
 async def get_defi(coin: str, current_user: dict = Depends(get_current_user)):
     # Placeholder
     messages = [{"role": "user", "content": f"DeFi strategies for {coin}"}]
-    strat = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    strat = await call_ai(current_user['preferences']['prompt_default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['prompt_default_provider']])
     return {"strategies": [strat]}
 
 @app.post("/query")
@@ -958,14 +1010,14 @@ async def get_query(request: Dict = Body(...), current_user: dict = Depends(get_
     query = request.get("query")
     # Placeholder
     messages = [{"role": "user", "content": query}]
-    res = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    res = await call_ai(current_user['preferences']['prompt_default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['prompt_default_provider']])
     return {"results": [res]}
 
 @app.post("/tax")
 async def get_tax(request: PortfolioRequest, current_user: dict = Depends(get_current_user)):
     # Placeholder
     messages = [{"role": "user", "content": f"Generate tax report for {request.portfolio}"}]
-    rep = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    rep = await call_ai(current_user['preferences']['prompt_default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['prompt_default_provider']])
     return {"reports": [rep]}
 
 @app.get("/forum")
@@ -982,14 +1034,14 @@ async def post_forum(request: Dict = Body(...), current_user: dict = Depends(get
 async def get_risk(token: str, current_user: dict = Depends(get_current_user)):
     # Placeholder
     messages = [{"role": "user", "content": f"Assess risk for {token}"}]
-    ass = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    ass = await call_ai(current_user['preferences']['prompt_default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['prompt_default_provider']])
     return {"assessments": [ass]}
 
 @app.get("/charts")
 async def get_charts(coin: str, current_user: dict = Depends(get_current_user)):
     # Placeholder
     messages = [{"role": "user", "content": f"Analyze chart for {coin}"}]
-    ana = await call_ai(current_user['preferences']['default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['default_provider']])
+    ana = await call_ai(current_user['preferences']['prompt_default_provider'], messages, current_user['preferences']['api_keys'][current_user['preferences']['prompt_default_provider']])
     return {"analyses": [ana]}
 
 @app.get("/bots")
@@ -1001,6 +1053,33 @@ async def get_bots(current_user: dict = Depends(get_current_user)):
 async def get_fraud(current_user: dict = Depends(get_current_user)):
     # Placeholder
     return {"alerts": []}
+
+@app.get("/coins/list")
+async def get_coins_list(current_user: dict = Depends(get_current_user)):
+    coingecko_key = current_user["preferences"]["api_keys"].get("CoinGecko")
+    try:
+        headers = {"x-cg-demo-api-key": coingecko_key} if coingecko_key else None
+        response = requests.get("https://api.coingecko.com/api/v3/coins/list", headers=headers)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logger.error(f"Failed to fetch coins list: {e}")
+        raise HTTPException(status_code=503, detail="Failed to fetch coins list")
+
+@app.get("/coins/markets")
+async def get_coins_markets(vs_currency: str = "usd", ids: str = "", current_user: dict = Depends(get_current_user)):
+    coingecko_key = current_user["preferences"]["api_keys"].get("CoinGecko")
+    try:
+        url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency}"
+        if ids:
+            url += f"&ids={ids}"
+        headers = {"x-cg-demo-api-key": coingecko_key} if coingecko_key else None
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logger.error(f"Failed to fetch coins markets: {e}")
+        raise HTTPException(status_code=503, detail="Failed to fetch coins markets")
 
 @app.get("/")
 def read_root():
