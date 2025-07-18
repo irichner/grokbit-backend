@@ -395,7 +395,7 @@ async def register(request: Request, user_data: Dict = Body(...)):
     if await users_collection.find_one({"username": username}):
         raise HTTPException(status_code=400, detail="Username already registered")
     hashed_password = pwd_context.hash(password)
-    irichner = await users_collection.find_one({"username": "irichner"})
+    admin_user = await users_collection.find_one({"email": "israel.richner@gmail.com"})
     default_prefs = {
         "prompt_default_provider": "Groq",
         "summary_default_provider": "Groq",
@@ -407,11 +407,12 @@ async def register(request: Request, user_data: Dict = Body(...)):
         "refresh_rate": 60000,
         "market_coins": []
     }
-    if irichner and "preferences" in irichner:
-        prefs = irichner["preferences"]
+    if admin_user and "preferences" in admin_user:
+        prefs = admin_user["preferences"]
         default_prefs["prompts"] = prefs.get("prompts", [])
         default_prefs["portfolio_prompts"] = prefs.get("portfolio_prompts", [])
         default_prefs["alert_prompts"] = prefs.get("alert_prompts", [])
+        default_prefs["market_coins"] = prefs.get("market_coins", [])
     user_dict = {
         "first_name": first_name,
         "last_name": last_name,
@@ -958,7 +959,8 @@ async def get_user_profile(current_user: dict = Depends(get_current_user)):
         "firstName": current_user.get("first_name", ""),
         "lastName": current_user.get("last_name", ""),
         "tier": current_user.get("tier", "free"),
-        "profileImage": current_user.get("profile_image", "")
+        "profileImage": current_user.get("profile_image", ""),
+        "email": current_user.get("email", "")
     }
 
 @app.get("/predictions")
@@ -1080,6 +1082,30 @@ async def get_coins_markets(vs_currency: str = "usd", ids: str = "", current_use
     except Exception as e:
         logger.error(f"Failed to fetch coins markets: {e}")
         raise HTTPException(status_code=503, detail="Failed to fetch coins markets")
+
+@app.get("/admin/defaults")
+async def get_defaults(current_user: dict = Depends(get_current_user)):
+    if current_user.get("email") != "israel.richner@gmail.com":
+        raise HTTPException(status_code=403, detail="Access denied")
+    prefs = current_user.get("preferences", {})
+    return {
+        "prompts": prefs.get("prompts", []),
+        "portfolio_prompts": prefs.get("portfolio_prompts", []),
+        "alert_prompts": prefs.get("alert_prompts", []),
+        "market_coins": prefs.get("market_coins", [])
+    }
+
+@app.post("/admin/defaults")
+async def update_defaults(defaults: Dict = Body(...), current_user: dict = Depends(get_current_user)):
+    if current_user.get("email") != "israel.richner@gmail.com":
+        raise HTTPException(status_code=403, detail="Access denied")
+    prefs = current_user.get("preferences", {})
+    prefs["prompts"] = defaults.get("prompts", [])
+    prefs["portfolio_prompts"] = defaults.get("portfolio_prompts", [])
+    prefs["alert_prompts"] = defaults.get("alert_prompts", [])
+    prefs["market_coins"] = defaults.get("market_coins", [])
+    await users_collection.update_one({"_id": current_user["_id"]}, {"$set": {"preferences": prefs}})
+    return {"message": "Defaults updated"}
 
 @app.get("/")
 def read_root():
