@@ -1,12 +1,13 @@
-# app/routers/auth.py
+# backend/app/routers/auth.py
 from fastapi import APIRouter, HTTPException, Depends, Body, Request, Response, Cookie
 from fastapi.security import OAuth2PasswordRequestForm
 from authlib.integrations.starlette_client import OAuth
+from starlette.responses import RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 from app.config import CLIENT_ID_GOOGLE, CLIENT_SECRET_GOOGLE, CLIENT_ID_GITHUB, CLIENT_SECRET_GITHUB, BACKEND_URL, FRONTEND_URL, ENV, SECRET_KEY
 from app.database import users_collection, ObjectId
 from app.models.user import User
-from app.services.auth import create_access_token, pwd_context
+from app.services.auth import create_access_token, pwd_context, ACCESS_TOKEN_EXPIRE_MINUTES
 from app.utils.security import cipher
 from app.utils.email import send_verification_email
 from app.dependencies import get_current_user
@@ -16,6 +17,10 @@ import secrets
 import re
 import requests
 from typing import Dict
+import logging
+import traceback
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -94,31 +99,43 @@ async def login(response: Response, request: Request, form_data: OAuth2PasswordR
     )
     return {"success": True}
 
-@router.get("/oauth/{provider}/login")
+@router.get("/oauth/{provider}/login", name="oauth_login")
 @limiter.limit("5/minute")
 async def oauth_login(request: Request, provider: str):
+    logger.info(f"Login request: provider={provider}, URL={request.url}")
     if provider not in providers:
+        logger.error(f"Provider not supported: {provider}")
         raise HTTPException(status_code=404, detail="Provider not supported")
     oauth_provider = oauth.create_client(provider)
-    redirect_uri = BACKEND_URL + f"/auth/oauth/{provider}/callback"
-    return await oauth_provider.authorize_redirect(request, redirect_uri)
+    redirect_uri = request.url_for('oauth_callback', provider=provider)
+    try:
+        return await oauth_provider.authorize_redirect(request, redirect_uri)
+    except Exception as e:
+        logger.error(f"OAuth login error for {provider}: {str(e)}\n{traceback.format_exc()}")
+        return RedirectResponse(url=FRONTEND_URL + '/login?error=auth_failed')
 
-@router.get("/oauth/{provider}/callback")
+@router.get("/oauth/{provider}/callback", name="oauth_callback")
 @limiter.limit("5/minute")
 async def oauth_callback(request: Request, provider: str):
+    logger.info(f"Callback received: provider={provider}, URL={request.url}, Query params={request.query_params}")
     if provider not in providers:
+        logger.error(f"Provider not supported: {provider}")
         raise HTTPException(status_code=404, detail="Provider not supported")
     oauth_provider = oauth.create_client(provider)
     try:
         token = await oauth_provider.authorize_access_token(request)
+        logger.debug(f"Token received: {token}")
     except Exception as e:
+        logger.error(f"OAuth token error for {provider}: {str(e)}\n{traceback.format_exc()}")
         return RedirectResponse(url=FRONTEND_URL + '/login?error=auth_failed')
     try:
         if provider == 'google':
             user_info = await oauth_provider.userinfo(token=token)
+            logger.debug(f"User info: {user_info}")
         else:
             user_resp = await oauth_provider.get(oauth_provider.userinfo_endpoint, token=token)
             user_info = user_resp.json()
+            logger.debug(f"User info: {user_info}")
         sub = user_info.get('id') or user_info.get('sub')
         email = user_info.get('email')
         name = user_info.get('name') or user_info.get('username', '')
@@ -130,6 +147,7 @@ async def oauth_callback(request: Request, provider: str):
         if not re.match(r"^[a-zA-Z0-9_ ]{0,50}$", name):
             name = ""
     except Exception as e:
+        logger.error(f"Userinfo error for {provider}: {str(e)}\n{traceback.format_exc()}")
         return RedirectResponse(url=FRONTEND_URL + '/login?error=userinfo_failed')
     query = {"oauth_providers." + provider + ".sub": sub}
     if email:
@@ -184,7 +202,7 @@ async def logout(current_user: dict = Depends(get_current_user)):
                 elif prov == 'github':
                     pass
             except Exception as e:
-                pass
+                logger.error(f"Logout error for {prov}: {str(e)}\n{traceback.format_exc()}")
     response.delete_cookie("grokbit_token", domain=".grokbit.ai")
     return response
 
