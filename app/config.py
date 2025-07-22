@@ -1,12 +1,14 @@
 # app/config.py
 import os
 from dotenv import load_dotenv
+from cryptography.fernet import Fernet
 
 load_dotenv()
 
 # Constants from OriginalMain.py
 SECRET_KEY = os.getenv("SECRET_KEY")
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+cipher = Fernet(ENCRYPTION_KEY.encode()) if ENCRYPTION_KEY else None
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 REFRESH_TOKEN_EXPIRE_MINUTES = 1440  # Added
