@@ -19,5 +19,7 @@ stripe
 redis
 sendgrid
 pywebpush
-slowapi
-redis
+feedparser==6.0.10
+legacy-cgi==2.6.3
+pwnedpasswords
+requests==2.31.0

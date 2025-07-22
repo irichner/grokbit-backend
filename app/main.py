@@ -36,7 +36,8 @@ import stripe
 import pwnedpasswords
 
 # Routers import
-from app.routers import auth, users, portfolio, alerts, market, payments, admin, insights, root
+from app.routers import auth, users, portfolio, alerts, market, payments, admin, insights, root, coins
+from app.routers.news import router as news_router  # New import for news router
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -56,6 +57,8 @@ app.include_router(market.router)
 app.include_router(payments.router)
 app.include_router(admin.router)
 app.include_router(insights.router)
+app.include_router(coins.router)
+app.include_router(news_router)  # Include the new news router
 
 # Rate limiting
 def get_rate_limit_key(request: Request):
@@ -69,7 +72,7 @@ app.add_exception_handler(429, _rate_limit_exceeded_handler)
 # CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.getenv("FRONTEND_URL", "https://grokbit.ai")],
+    allow_origins=[os.getenv("FRONTEND_URL", "http://localhost:3000")],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -526,7 +529,8 @@ async def login(response: Response, request: Request, form_data: OAuth2PasswordR
         raise HTTPException(status_code=403, detail="Verify email first")
     access_token = create_access_token({"sub": user["username"]})
     refresh_token = create_refresh_token({"sub": user["username"]})
-    secure = os.getenv("ENV") == "prod" or not os.getenv("BACKEND_URL", "").startswith("http://localhost")
+    secure = os.getenv("ENV") == "prod"
+    domain = ".grokbit.ai" if os.getenv("ENV") == "prod" else None
     response.set_cookie(
         key="grokbit_token",
         value=access_token,
@@ -535,7 +539,7 @@ async def login(response: Response, request: Request, form_data: OAuth2PasswordR
         samesite='strict',
         path='/',
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        domain=".grokbit.ai"
+        domain=domain
     )
     response.set_cookie(
         key="grokbit_refresh",
@@ -545,7 +549,7 @@ async def login(response: Response, request: Request, form_data: OAuth2PasswordR
         samesite='strict',
         path='/',
         max_age=REFRESH_TOKEN_EXPIRE_MINUTES * 60,
-        domain=".grokbit.ai"
+        domain=domain
     )
     logger.info(f"User logged in: {form_data.username}")
     return {"success": True}
@@ -566,7 +570,8 @@ async def refresh(response: Response, grokbit_refresh: str = Cookie(None)):
     if not user:
         raise credentials_exception
     access_token = create_access_token({"sub": username})
-    secure = os.getenv("ENV") == "prod" or not os.getenv("BACKEND_URL", "").startswith("http://localhost")
+    secure = os.getenv("ENV") == "prod"
+    domain = ".grokbit.ai" if os.getenv("ENV") == "prod" else None
     response.set_cookie(
         key="grokbit_token",
         value=access_token,
@@ -575,7 +580,7 @@ async def refresh(response: Response, grokbit_refresh: str = Cookie(None)):
         samesite='strict',
         path='/',
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        domain=".grokbit.ai"
+        domain=domain
     )
     return {"success": True}
 
@@ -627,7 +632,7 @@ async def oauth_login(request: Request, provider: str):
     if provider not in providers:
         raise HTTPException(status_code=404, detail="Provider not supported")
     oauth_provider = oauth.create_client(provider)
-    redirect_uri = os.getenv("BACKEND_URL", "https://grokbit-backend.onrender.com") + f"/oauth/{provider}/callback"
+    redirect_uri = os.getenv("BACKEND_URL", "http://localhost:8000") + f"/oauth/{provider}/callback"  # Adjusted for local
     return await oauth_provider.authorize_redirect(request, redirect_uri)
 
 @app.get("/oauth/{provider}/callback")
@@ -692,7 +697,8 @@ async def oauth_callback(request: Request, provider: str):
         await users_collection.insert_one(new_user)
         user = await users_collection.find_one({"username": username})
     access_token = create_access_token({"sub": user["username"]})
-    secure = os.getenv("ENV") == "prod" or not os.getenv("BACKEND_URL", "").startswith("http://localhost")
+    secure = os.getenv("ENV") == "prod"
+    domain = ".grokbit.ai" if os.getenv("ENV") == "prod" else None
     response = RedirectResponse(url=os.getenv('FRONTEND_URL', 'http://localhost:3000'))
     response.set_cookie(
         key="grokbit_token",
@@ -702,7 +708,7 @@ async def oauth_callback(request: Request, provider: str):
         samesite='strict',
         path='/',
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        domain=".grokbit.ai"
+        domain=domain
     )
     logger.info(f"OAuth login successful for {provider}: {user['username']}")
     return response
@@ -722,8 +728,9 @@ async def logout(current_user: dict = Depends(get_current_user)):
                     pass
             except Exception as e:
                 logger.error(f"Failed to revoke {prov} token: {e}")
-    response.delete_cookie("grokbit_token", domain=".grokbit.ai")
-    response.delete_cookie("grokbit_refresh", domain=".grokbit.ai")
+    domain = ".grokbit.ai" if os.getenv("ENV") == "prod" else None
+    response.delete_cookie("grokbit_token", domain=domain)
+    response.delete_cookie("grokbit_refresh", domain=domain)
     logger.info(f"User logged out: {current_user['username']}")
     return response
 

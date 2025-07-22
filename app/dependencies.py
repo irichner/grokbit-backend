@@ -1,11 +1,10 @@
 # app/dependencies.py
-from fastapi import HTTPException, Depends, Cookie
+from fastapi import HTTPException, Cookie
 from jose import JWTError, jwt
-from app.config import SECRET_KEY, ALGORITHM
-from app.database import users_collection, ObjectId
-from cryptography.fernet import Fernet, InvalidToken
-from app.config import ENCRYPTION_KEY, DEFAULT_MODELS
-from app.utils.security import cipher
+from bson import ObjectId
+from typing import Optional
+from datetime import datetime, timedelta
+from app.config import SECRET_KEY, ALGORITHM, cipher, users_collection, DEFAULT_MODELS
 
 async def get_current_user(grokbit_token: str = Cookie(None)):
     credentials_exception = HTTPException(status_code=401, detail="Could not validate credentials")
