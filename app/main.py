@@ -11,16 +11,14 @@ from dotenv import load_dotenv
 import os
 import requests
 import json
-from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 from datetime import datetime, timedelta
-from jose import JWTError, jwt
+from jose import jwt
 from passlib.context import CryptContext
 from typing import List, Optional, Dict
 from groq import Groq
 import google.generativeai as genai
 from huggingface_hub import InferenceClient
-from cryptography.fernet import Fernet, InvalidToken
 import time
 from huggingface_hub import list_models
 from authlib.integrations.starlette_client import OAuth
@@ -38,6 +36,11 @@ import pwnedpasswords
 # Routers import
 from app.routers import auth, users, portfolio, alerts, market, payments, admin, insights, root, coins
 from app.routers.news import router as news_router  # New import for news router
+
+# Database and dependencies
+from .database import db, users_collection, portfolios_collection, alerts_collection
+from .dependencies import get_current_user
+from .config import SECRET_KEY, ALGORITHM, cipher, DEFAULT_MODELS
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -103,16 +106,6 @@ oauth.register(
     userinfo_endpoint='https://api.github.com/user'
 )
 
-# MongoDB setup
-MONGO_URI = os.getenv("MONGO_URI")
-if not MONGO_URI:
-    raise ValueError("MONGO_URI must be set in environment variables")
-client = AsyncIOMotorClient(MONGO_URI)
-db = client.grokbit
-users_collection = db.users
-portfolios_collection = db.portfolios
-alerts_collection = db.alerts
-
 # Ensure MongoDB indexes
 async def create_indexes():
     await users_collection.create_index("username", unique=True)
@@ -120,20 +113,6 @@ async def create_indexes():
     await users_collection.create_index("oauth_providers.github.sub")
     await portfolios_collection.create_index("user_id")
     await alerts_collection.create_index("user_id")
-
-SECRET_KEY = os.getenv("SECRET_KEY")
-if not SECRET_KEY:
-    raise ValueError("SECRET_KEY must be set in environment variables")
-ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
-if not ENCRYPTION_KEY:
-    raise ValueError("ENCRYPTION_KEY must be set in environment variables")
-cipher = Fernet(ENCRYPTION_KEY.encode())
-
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-REFRESH_TOKEN_EXPIRE_MINUTES = 1440  # 1 day
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Price cache
 price_cache = TTLCache(maxsize=100, ttl=60)
@@ -149,14 +128,6 @@ KNOWN_IDS = {
     'USDT': 'tether',
     'BNB': 'bnb',
     'SOL': 'solana',
-}
-
-DEFAULT_MODELS = {
-    "Groq": os.getenv("DEFAULT_MODEL_GROQ", "llama-3.1-8b-instant"),
-    "Gemini": os.getenv("DEFAULT_MODEL_GEMINI", "gemini-2.5-flash"),
-    "HuggingFace": os.getenv("DEFAULT_MODEL_HF", "mistralai/Mistral-7B-Instruct-v0.3"),
-    "Grok": os.getenv("DEFAULT_MODEL_GROK", "grok-3"),
-    "CoinGecko": "N/A"
 }
 
 providers_order = ["Groq", "Gemini", "HuggingFace", "Grok", "CoinGecko"]
@@ -323,44 +294,6 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     token: str
     password: str
-
-async def get_current_user(grokbit_token: str = Cookie(None)):
-    credentials_exception = HTTPException(status_code=401, detail="Could not validate credentials")
-    if not grokbit_token:
-        raise credentials_exception
-    try:
-        payload = jwt.decode(grokbit_token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    user = await users_collection.find_one({"username": username})
-    if not user:
-        raise credentials_exception
-    # Decrypt API keys
-    if "preferences" in user and "api_keys" in user["preferences"]:
-        decrypted_keys = {}
-        for provider, enc_key in user["preferences"]["api_keys"].items():
-            if enc_key:
-                try:
-                    decrypted_keys[provider] = cipher.decrypt(enc_key.encode()).decode()
-                except InvalidToken:
-                    decrypted_keys[provider] = ""
-            else:
-                decrypted_keys[provider] = ""
-        user["preferences"]["api_keys"] = decrypted_keys
-    # Ensure lists and models
-    if "preferences" in user:
-        user["preferences"]["prompts"] = user["preferences"].get("prompts", [])
-        user["preferences"]["portfolio_prompts"] = user["preferences"].get("portfolio_prompts", [])
-        user["preferences"]["alert_prompts"] = user["preferences"].get("alert_prompts", [])
-        user["preferences"]["models"] = {**DEFAULT_MODELS, **user["preferences"].get("models", {})}
-        user["preferences"]["prompt_default_provider"] = user["preferences"].get("prompt_default_provider", "Groq")
-        user["preferences"]["summary_default_provider"] = user["preferences"].get("summary_default_provider", "Groq")
-        user["preferences"]["refresh_rate"] = user["preferences"].get("refresh_rate", 60000)
-        user["preferences"]["market_coins"] = user["preferences"].get("market_coins", [])
-    return user
 
 def create_access_token(data: dict):
     to_encode = data.copy()
