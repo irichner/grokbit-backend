@@ -30,7 +30,16 @@ DEFAULT_MODELS = {
     "Gemini": os.getenv("DEFAULT_MODEL_GEMINI", "gemini-2.5-flash"),
     "HuggingFace": os.getenv("DEFAULT_MODEL_HF", "mistralai/Mistral-7B-Instruct-v0.3"),
     "Grok": os.getenv("DEFAULT_MODEL_GROK", "grok-3"),
-    "CoinGecko": "N/A"
+    "CoinGecko": "N/A",
+    "OpenAI": "gpt-4o",
+    "Anthropic": "claude-3-5-sonnet-20240620",
+    "Mistral": "mistral-large-latest",
+    "Cohere": "command",
+    "Perplexity": "llama-3-sonar-large-32k-online",
+    "Replicate": "meta/llama-2-70b-chat",
+    "Together": "togethercomputer/llama-2-70b-chat",
+    "Fireworks": "accounts/fireworks/models/mixtral-8x7b-instruct",
+    "Novita": "novita/llama-2-70b"
 }
-providers_order = ["Groq", "Gemini", "HuggingFace", "Grok", "CoinGecko"]
+providers_order = ["Groq", "Gemini", "HuggingFace", "Grok", "CoinGecko", "OpenAI", "Anthropic", "Mistral", "Cohere", "Perplexity", "Replicate", "Together", "Fireworks", "Novita"]
 # Add stripe.api_key if needed: stripe.api_key = os.getenv("STRIPE_SECRET_KEY")

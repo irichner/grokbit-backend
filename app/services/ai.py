@@ -6,6 +6,12 @@ from huggingface_hub import InferenceClient
 import requests
 import time
 from app.config import DEFAULT_MODELS
+import openai
+from anthropic import Anthropic
+from mistralai.client import MistralClient
+from cohere import Client as CohereClient
+from replicate import Client as ReplicateClient
+from together import Together
 
 async def call_ai(provider: str, messages: list, user_api_key: Optional[str] = None, model: str = None):
     api_key = user_api_key
@@ -52,4 +58,40 @@ async def call_ai(provider: str, messages: list, user_api_key: Optional[str] = N
                     continue
                 else:
                     raise ValueError(f"Grok API request failed after {max_retries} attempts: {str(e)}")
+    elif provider == "OpenAI":
+        client = openai.OpenAI(api_key=api_key)
+        response = client.chat.completions.create(messages=messages, model=model, stream=False, temperature=0)
+        return response.choices[0].message.content
+    elif provider == "Anthropic":
+        client = Anthropic(api_key=api_key)
+        response = client.messages.create(messages=messages, model=model, stream=False, temperature=0, max_tokens=500)
+        return response.content[0].text
+    elif provider == "Mistral":
+        client = MistralClient(api_key=api_key)
+        response = client.chat(messages=messages, model=model, stream=False, temperature=0)
+        return response.choices[0].message.content
+    elif provider == "Cohere":
+        client = CohereClient(api_key=api_key)
+        response = client.chat(messages=messages, model=model, stream=False, temperature=0)
+        return response.text
+    elif provider == "Perplexity":
+        client = openai.OpenAI(api_key=api_key, base_url="https://api.perplexity.ai")
+        response = client.chat.completions.create(messages=messages, model=model, stream=False, temperature=0)
+        return response.choices[0].message.content
+    elif provider == "Replicate":
+        client = ReplicateClient(api_key=api_key)
+        response = client.run(model, input={"prompt": messages[-1]["content"]})
+        return ''.join(response)
+    elif provider == "Together":
+        client = Together(api_key=api_key)
+        response = client.chat.completions.create(messages=messages, model=model, stream=False, temperature=0)
+        return response.choices[0].message.content
+    elif provider == "Fireworks":
+        client = openai.OpenAI(api_key=api_key, base_url="https://api.fireworks.ai/inference/v1")
+        response = client.chat.completions.create(messages=messages, model=model, stream=False, temperature=0)
+        return response.choices[0].message.content
+    elif provider == "Novita":
+        client = openai.OpenAI(api_key=api_key, base_url="https://api.novita.ai/v3")
+        response = client.chat.completions.create(messages=messages, model=model, stream=False, temperature=0)
+        return response.choices[0].message.content
     raise ValueError("Invalid provider")

@@ -2,7 +2,7 @@ fastapi
 uvicorn
 pydantic
 python-dotenv
-requests
+requests==2.32.2  # Updated to resolve datasets conflict
 motor
 pymongo
 python-jose[cryptography]
@@ -22,5 +22,12 @@ pywebpush
 feedparser==6.0.10
 legacy-cgi==2.6.3
 pwnedpasswords
-requests==2.31.0
 python-dateutil
+openai
+anthropic
+mistralai
+cohere
+replicate
+together
+fireworks-ai==0.19.7  # Updated to resolve reward-kit conflict
+protobuf==5.29.3
