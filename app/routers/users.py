@@ -11,6 +11,7 @@ import google.generativeai as genai
 from fastapi import HTTPException
 import logging
 from pydantic import BaseModel
+from cryptography.fernet import InvalidToken
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,12 @@ async def update_preferences(preferences: Dict = Body(...), current_user: dict =
     encrypted_api_keys = {}
     for provider, key in preferences.get("api_keys", {}).items():
         if key:
-            encrypted_api_keys[provider] = cipher.encrypt(key.encode()).decode()
+            try:
+                encrypted_api_keys[provider] = cipher.encrypt(key.encode()).decode()
+                logger.info(f"Encrypted key for {provider}")
+            except Exception as e:
+                logger.error(f"Encryption failed for {provider}: {str(e)}")
+                encrypted_api_keys[provider] = key  # fallback to plain if encryption fails
         else:
             encrypted_api_keys[provider] = ""
     preferences["api_keys"] = encrypted_api_keys
@@ -55,11 +61,21 @@ async def get_preferences(current_user: dict = Depends(get_current_user)):
 
 @router.get("/models")
 async def get_models(provider: str, current_user: dict = Depends(get_current_user)):
-    api_key = current_user["preferences"]["api_keys"].get(provider)
-    if api_key:
-        api_key = cipher.decrypt(api_key.encode()).decode()
+    api_key_enc = current_user["preferences"]["api_keys"].get(provider)
+    api_key = None
+    if api_key_enc:
+        logger.info(f"Attempting decryption for {provider}, enc: {api_key_enc}")
+        if api_key_enc.startswith('gAAAAA'):
+            try:
+                api_key = cipher.decrypt(api_key_enc.encode()).decode()
+                logger.info(f"Decryption successful for {provider}")
+            except InvalidToken:
+                logger.error(f"Decryption failed with InvalidToken for {provider}")
+        else:
+            api_key = api_key_enc
+            logger.warning(f"Using plain API key for {provider}")
     if not api_key and provider != "CoinGecko":
-        raise HTTPException(status_code=400, detail=f"No API key for {provider}")
+        raise HTTPException(status_code=400, detail=f"No valid API key for {provider}")
     models = []
     try:
         if provider == "Groq":
