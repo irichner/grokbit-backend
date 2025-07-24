@@ -8,12 +8,14 @@ import json
 import logging
 from app.utils.security import cipher
 import redis
+import os
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/market", tags=["market"])
 
-redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
+redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+redis_client = redis.Redis.from_url(redis_url)
 
 KNOWN_IDS = {
     'BNB': 'bnb',

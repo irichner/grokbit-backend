@@ -33,6 +33,10 @@ async def save_alerts(request: AlertsRequest, current_user: dict = Depends(get_c
 async def check_ai_alert_route(request: AlertCheckRequest, current_user: dict = Depends(get_current_user)):
     return await check_ai_alert(request.prompt, current_user)
 
+@router.options("/push/subscribe")
+async def options_push_subscribe():
+    return {"status": "ok"}
+
 @router.post("/push/subscribe")
 async def push_subscribe(sub: Dict = Body(...), current_user: dict = Depends(get_current_user)):
     await users_collection.update_one({"_id": current_user["_id"]}, {"$set": {"push_sub": sub}})
