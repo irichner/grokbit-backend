@@ -5,16 +5,19 @@ from app.dependencies import get_current_user
 from app.database import users_collection, ObjectId
 from app.utils.security import cipher
 from app.config import DEFAULT_MODELS
-from app.services.ai import call_ai
 from requests import get
 from huggingface_hub import list_models
 import google.generativeai as genai
 from fastapi import HTTPException
 import logging
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+class MarketCoin(BaseModel):
+    symbol: str
 
 @router.post("/preferences")
 async def update_preferences(preferences: Dict = Body(...), current_user: dict = Depends(get_current_user)):
@@ -53,6 +56,8 @@ async def get_preferences(current_user: dict = Depends(get_current_user)):
 @router.get("/models")
 async def get_models(provider: str, current_user: dict = Depends(get_current_user)):
     api_key = current_user["preferences"]["api_keys"].get(provider)
+    if api_key:
+        api_key = cipher.decrypt(api_key.encode()).decode()
     if not api_key and provider != "CoinGecko":
         raise HTTPException(status_code=400, detail=f"No API key for {provider}")
     models = []
@@ -94,3 +99,25 @@ async def get_user_profile(current_user: dict = Depends(get_current_user)):
         "profileImage": current_user.get("profile_image", ""),
         "email": current_user.get("email", "")
     }
+
+@router.post("/market_coin")
+async def add_market_coin(coin: MarketCoin, current_user: dict = Depends(get_current_user)):
+    user_id = ObjectId(current_user["_id"])
+    prefs = current_user["preferences"]
+    market_coins = prefs.get("market_coins", [])
+    upper = coin.symbol.upper()
+    if upper not in market_coins:
+        market_coins.append(upper)
+        await users_collection.update_one({"_id": user_id}, {"$set": {"preferences.market_coins": market_coins}})
+    return {"message": "Coin added"}
+
+@router.delete("/market_coin/{symbol}")
+async def remove_market_coin(symbol: str, current_user: dict = Depends(get_current_user)):
+    user_id = ObjectId(current_user["_id"])
+    prefs = current_user["preferences"]
+    market_coins = prefs.get("market_coins", [])
+    upper = symbol.upper()
+    if upper in market_coins:
+        market_coins.remove(upper)
+        await users_collection.update_one({"_id": user_id}, {"$set": {"preferences.market_coins": market_coins}})
+    return {"message": "Coin removed"}

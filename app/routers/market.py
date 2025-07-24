@@ -2,14 +2,26 @@
 from fastapi import APIRouter, Depends, Body, HTTPException
 from app.dependencies import get_current_user
 from app.services.price import COIN_ID_MAP, get_price
-from typing import Dict
+from typing import Dict, List
 import requests
 import json
 import logging
+from app.utils.security import cipher
+import redis
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/market", tags=["market"])
+
+redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
+
+KNOWN_IDS = {
+    'BNB': 'bnb',
+    'BTC': 'bitcoin',
+    'ETH': 'ethereum',
+    'USDT': 'tether',
+    'SOL': 'solana'
+}
 
 @router.post("/prices")
 async def get_prices(request: Dict = Body(...), current_user: dict = Depends(get_current_user)):
@@ -17,7 +29,12 @@ async def get_prices(request: Dict = Body(...), current_user: dict = Depends(get
     result = {}
     if not coins:
         return result
-    coingecko_key = current_user["preferences"]["api_keys"].get("CoinGecko")
+    coingecko_key = current_user["preferences"]["api_keys"].get("CoinGecko", '')
+    if coingecko_key:
+        try:
+            coingecko_key = cipher.decrypt(coingecko_key.encode()).decode()
+        except:
+            pass  # Use as is if decryption fails
     try:
         cg_ids = [KNOWN_IDS.get(c.upper()) or COIN_ID_MAP.get(c.upper()) for c in coins if KNOWN_IDS.get(c.upper()) or COIN_ID_MAP.get(c.upper())]
         if cg_ids:
@@ -82,7 +99,12 @@ async def get_coins(current_user: dict = Depends(get_current_user)):
 
 @router.get("/coins/list")
 async def get_coins_list(current_user: dict = Depends(get_current_user)):
-    coingecko_key = current_user["preferences"]["api_keys"].get("CoinGecko")
+    coingecko_key = current_user["preferences"]["api_keys"].get("CoinGecko", '')
+    if coingecko_key:
+        try:
+            coingecko_key = cipher.decrypt(coingecko_key.encode()).decode()
+        except:
+            pass  # Use as is if decryption fails
     try:
         headers = {"x-cg-demo-api-key": coingecko_key} if coingecko_key else None
         response = requests.get("https://api.coingecko.com/api/v3/coins/list", headers=headers)
@@ -92,17 +114,81 @@ async def get_coins_list(current_user: dict = Depends(get_current_user)):
         logger.error(f"Failed to fetch coins list: {e}")
         raise HTTPException(status_code=503, detail="Failed to fetch coins list")
 
-@router.get("/coins/markets")
-async def get_coins_markets(vs_currency: str = "usd", ids: str = "", current_user: dict = Depends(get_current_user)):
-    coingecko_key = current_user["preferences"]["api_keys"].get("CoinGecko")
+@router.post("/coins/markets")
+async def get_coins_markets(data: Dict = Body(...), current_user: dict = Depends(get_current_user)):
+    ids = data.get('ids', [])
+    vs_currency = data.get('vs_currency', 'usd')
+    coingecko_key = current_user["preferences"]["api_keys"].get("CoinGecko", '')
+    if coingecko_key:
+        try:
+            coingecko_key = cipher.decrypt(coingecko_key.encode()).decode()
+        except:
+            pass  # Use as is if decryption fails
     try:
-        url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency}"
-        if ids:
-            url += f"&ids={ids}"
-        headers = {"x-cg-demo-api-key": coingecko_key} if coingecko_key else None
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        return response.json()
+        results = []
+        missing_ids = []
+        id_to_index = {id_: idx for idx, id_ in enumerate(ids)}
+        for id_ in ids:
+            key = f"market:{id_}:{vs_currency}"
+            cached = None
+            try:
+                cached = redis_client.get(key)
+            except Exception as redis_err:
+                logger.error(f"Redis error: {redis_err}")
+            if cached:
+                results.append((id_, json.loads(cached)))
+            else:
+                missing_ids.append(id_)
+        if missing_ids:
+            headers = {"x-cg-demo-api-key": coingecko_key} if coingecko_key else None
+            for i in range(0, len(missing_ids), 250):
+                batch = missing_ids[i:i+250]
+                batch_str = ','.join(batch)
+                url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency}&ids={batch_str}&price_change_percentage=1h%2C24h%2C7d"
+                response = requests.get(url, headers=headers)
+                response.raise_for_status()
+                batch_data = response.json()
+                for item in batch_data:
+                    item_key = f"market:{item['id']}:{vs_currency}"
+                    try:
+                        redis_client.set(item_key, json.dumps(item), ex=30)
+                    except Exception as redis_err:
+                        logger.error(f"Redis error: {redis_err}")
+                    results.append((item['id'], item))
+        results.sort(key=lambda x: id_to_index[x[0]])
+        final_results = [data for id_, data in results]
+        return final_results
     except Exception as e:
         logger.error(f"Failed to fetch coins markets: {e}")
         raise HTTPException(status_code=503, detail="Failed to fetch coins markets")
+
+@router.get("/global")
+async def get_global(current_user: dict = Depends(get_current_user)):
+    key = "market:global"
+    cached = None
+    try:
+        cached = redis_client.get(key)
+    except Exception as redis_err:
+        logger.error(f"Redis error: {redis_err}")
+    if cached:
+        return json.loads(cached)
+    coingecko_key = current_user["preferences"]["api_keys"].get("CoinGecko", '')
+    if coingecko_key:
+        try:
+            coingecko_key = cipher.decrypt(coingecko_key.encode()).decode()
+        except:
+            pass  # Use as is if decryption fails
+    try:
+        url = "https://api.coingecko.com/api/v3/global"
+        headers = {"x-cg-demo-api-key": coingecko_key} if coingecko_key else None
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        try:
+            redis_client.set(key, json.dumps(data), ex=30)
+        except Exception as redis_err:
+            logger.error(f"Redis error: {redis_err}")
+        return data
+    except Exception as e:
+        logger.error(f"Failed to fetch global data: {e}")
+        raise HTTPException(status_code=503, detail="Failed to fetch global data")
