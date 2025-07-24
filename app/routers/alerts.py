@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, Body
 from app.models.alert import AlertsRequest, AlertCheckRequest
 from app.dependencies import get_current_user
-from app.database import alerts_collection, ObjectId
+from app.database import alerts_collection, users_collection, ObjectId
 from datetime import datetime
 from app.services.alert import check_ai_alert, send_push
 from typing import Dict
