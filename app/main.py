@@ -75,7 +75,7 @@ app.add_exception_handler(429, _rate_limit_exceeded_handler)
 # CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "https://grokbit.ai"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
