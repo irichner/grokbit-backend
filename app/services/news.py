@@ -19,7 +19,7 @@ def clean_summary(text):
 
 def get_crypto_news(coin=None, limit=10):
     feeds = [
-        "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
+        "https://www.coindesk.com/arc/outboundfeeds/rss/",
         "https://cointelegraph.com/rss",
         "https://thedefiant.io/feed",
         "https://blockworks.co/feed"

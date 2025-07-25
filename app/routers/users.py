@@ -1,5 +1,5 @@
 # app/routers/users.py
-from fastapi import APIRouter, Depends, Body
+from fastapi import APIRouter, Depends, Body, Header
 from typing import Dict
 from app.dependencies import get_current_user
 from app.database import users_collection, ObjectId
@@ -20,20 +20,71 @@ router = APIRouter(prefix="/users", tags=["users"])
 class MarketCoin(BaseModel):
     symbol: str
 
+def get_coingecko_details(api_key: str) -> Dict:
+    details = {}
+    if not api_key:
+        details = {"plan": "free", "rate_limit": 10, "monthly_credits": "Unlimited", "usage": 0}
+        return details
+    # Try pro
+    pro_base = "https://pro-api.coingecko.com/api/v3"
+    headers_pro = {"x-cg-pro-api-key": api_key}
+    resp_pro_ping = get(f"{pro_base}/ping", headers=headers_pro)
+    if resp_pro_ping.ok:
+        resp_pro_key = get(f"{pro_base}/key", headers=headers_pro)
+        if resp_pro_key.ok:
+            data = resp_pro_key.json()
+            plan = data.get("plan_name", "unknown")
+            monthly = data.get("monthly_credit_limit", 0)
+            usage = data.get("usage_this_month", 0)
+            rate_map = {
+                "analyst": 500,
+                "lite": 500,
+                "pro": 1000,
+                "enterprise": 1250,
+            }
+            rate_limit = rate_map.get(plan, 500)
+            details = {"plan": plan, "rate_limit": rate_limit, "monthly_credits": monthly, "usage": usage}
+        else:
+            details = {"plan": "pro_unknown", "rate_limit": 500, "monthly_credits": "Unknown", "usage": "Unknown"}
+    else:
+        # Try demo
+        demo_base = "https://api.coingecko.com/api/v3"
+        headers_demo = {"x-cg-demo-api-key": api_key}
+        resp_demo_ping = get(f"{demo_base}/ping", headers=headers_demo)
+        if resp_demo_ping.ok:
+            details = {"plan": "demo", "rate_limit": 30, "monthly_credits": 10000, "usage": "N/A"}
+        else:
+            details = {"plan": "free", "rate_limit": 10, "monthly_credits": "Unlimited", "usage": 0}
+    return details
+
 @router.post("/preferences")
 async def update_preferences(preferences: Dict = Body(...), current_user: dict = Depends(get_current_user)):
     encrypted_api_keys = {}
+    market_details = preferences.get("market_details", {})
     for provider, key in preferences.get("api_keys", {}).items():
-        if key:
-            try:
+        if provider == "CoinGecko":
+            details = get_coingecko_details(key)
+            market_details[provider] = details
+            if key and details["plan"] != "free":
                 encrypted_api_keys[provider] = cipher.encrypt(key.encode()).decode()
-                logger.info(f"Encrypted key for {provider}")
-            except Exception as e:
-                logger.error(f"Encryption failed for {provider}: {str(e)}")
-                encrypted_api_keys[provider] = key  # fallback to plain if encryption fails
+            else:
+                encrypted_api_keys[provider] = ""
         else:
-            encrypted_api_keys[provider] = ""
+            if key:
+                try:
+                    encrypted_api_keys[provider] = cipher.encrypt(key.encode()).decode()
+                    logger.info(f"Encrypted key for {provider}")
+                except Exception as e:
+                    logger.error(f"Encryption failed for {provider}: {str(e)}")
+                    encrypted_api_keys[provider] = key  # fallback to plain if encryption fails
+            else:
+                encrypted_api_keys[provider] = ""
+    # Clean up market_details for removed providers
+    for prov in list(market_details.keys()):
+        if prov not in encrypted_api_keys:
+            del market_details[prov]
     preferences["api_keys"] = encrypted_api_keys
+    preferences["market_details"] = market_details
     if "prompts" not in preferences:
         preferences["prompts"] = []
     if "portfolio_prompts" not in preferences:
@@ -50,6 +101,8 @@ async def update_preferences(preferences: Dict = Body(...), current_user: dict =
         preferences["refresh_rate"] = 60000
     if "market_coins" not in preferences:
         preferences["market_coins"] = []
+    if "market_details" not in preferences:
+        preferences["market_details"] = {}
     await users_collection.update_one({"_id": ObjectId(current_user["_id"])}, {"$set": {"preferences": preferences}})
     return {"message": "Preferences updated"}
 
@@ -57,26 +110,32 @@ async def update_preferences(preferences: Dict = Body(...), current_user: dict =
 async def get_preferences(current_user: dict = Depends(get_current_user)):
     prefs = current_user.get("preferences", {})
     prefs["models"] = {**DEFAULT_MODELS, **prefs.get("models", {})}
+    prefs["market_details"] = prefs.get("market_details", {})
     return prefs
 
 @router.get("/models")
-async def get_models(provider: str, current_user: dict = Depends(get_current_user)):
-    api_key_enc = current_user["preferences"]["api_keys"].get(provider)
+async def get_models(provider: str, x_api_key: str = Header(None), current_user: dict = Depends(get_current_user)):
     api_key = None
-    if api_key_enc:
-        logger.info(f"Attempting decryption for {provider}, enc: {api_key_enc}")
-        if api_key_enc.startswith('gAAAAA'):
-            try:
-                api_key = cipher.decrypt(api_key_enc.encode()).decode()
-                logger.info(f"Decryption successful for {provider}")
-            except InvalidToken:
-                logger.error(f"Decryption failed with InvalidToken for {provider}")
-        else:
-            api_key = api_key_enc
-            logger.warning(f"Using plain API key for {provider}")
+    if x_api_key:
+        api_key = x_api_key
+        logger.info(f"Using provided X-API-Key for {provider}")
+    else:
+        api_key_enc = current_user["preferences"]["api_keys"].get(provider)
+        if api_key_enc:
+            logger.info(f"Attempting decryption for {provider}, enc: {api_key_enc}")
+            if api_key_enc.startswith('gAAAAA'):
+                try:
+                    api_key = cipher.decrypt(api_key_enc.encode()).decode()
+                    logger.info(f"Decryption successful for {provider}")
+                except InvalidToken:
+                    logger.error(f"Decryption failed with InvalidToken for {provider}")
+            else:
+                api_key = api_key_enc
+                logger.warning(f"Using plain API key for {provider}")
     if not api_key and provider != "CoinGecko":
         raise HTTPException(status_code=400, detail=f"No valid API key for {provider}")
     models = []
+    details = {}
     try:
         if provider == "Groq":
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -99,12 +158,17 @@ async def get_models(provider: str, current_user: dict = Depends(get_current_use
             models = [m["id"] for m in data.get("data", [])]
         elif provider == "CoinGecko":
             models = []
+            details = get_coingecko_details(api_key)
+            if api_key and details["plan"] == "free":
+                raise HTTPException(status_code=400, detail="Invalid CoinGecko API key")
         else:
             raise HTTPException(status_code=400, detail="Unsupported provider")
+    except HTTPException as http_exc:
+        raise http_exc
     except Exception as e:
         logger.error(f"Failed to fetch models for {provider}: {e}")
         raise HTTPException(status_code=503, detail=f"Failed to fetch models for {provider}: {str(e)}")
-    return {"models": models}
+    return {"models": models, "details": details}
 
 @router.get("/profile")
 async def get_user_profile(current_user: dict = Depends(get_current_user)):
