@@ -5,6 +5,7 @@ from typing import Optional
 class InsightRequest(BaseModel):
     coin: str
     provider: Optional[str] = None
+    stream: Optional[bool] = False
 
 # Added from OriginalMain.py
 class ForgotPasswordRequest(BaseModel):

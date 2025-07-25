@@ -1,5 +1,6 @@
 # app/routers/insights.py
 from fastapi import APIRouter, Depends, Body, HTTPException
+from fastapi.responses import StreamingResponse
 from app.models.other import InsightRequest
 from app.dependencies import get_current_user
 from app.services.ai import call_ai
@@ -28,8 +29,15 @@ async def get_insights(request: InsightRequest, current_user: dict = Depends(get
         {"role": "user", "content": request.coin}
     ]
     try:
-        insight = await call_ai(selected_provider, messages, api_key, model)
-        return {"insight": insight}
+        if request.stream:
+            async def stream_gen():
+                gen = await call_ai(selected_provider, messages, api_key, model, stream=True)
+                for chunk in gen:
+                    yield chunk
+            return StreamingResponse(stream_gen(), media_type="text/plain")
+        else:
+            insight = await call_ai(selected_provider, messages, api_key, model, stream=False)
+            return {"insight": insight}
     except Exception as e:
         logger.error(f"AI call failed for {selected_provider}: {e}")
         raise HTTPException(status_code=503, detail=f"API error: {str(e)}")

@@ -32,6 +32,7 @@ from sendgrid.helpers.mail import Mail
 from pywebpush import webpush, WebPushException
 import stripe
 import pwnedpasswords
+from app.models.other import InsightRequest
 
 # Routers import
 from app.routers import auth, users, portfolio, alerts, market, payments, admin, insights, root, coins
@@ -232,6 +233,7 @@ class Token(BaseModel):
 class InsightRequest(BaseModel):
     coin: str
     provider: Optional[str] = None
+    stream: Optional[bool] = False
 
 class PortfolioItem(BaseModel):
     coin: str
@@ -319,54 +321,6 @@ def create_reset_token(data: dict):
     expire = datetime.utcnow() + timedelta(hours=1)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-async def call_ai(provider: str, messages: list, user_api_key: Optional[str] = None, model: str = None):
-    api_key = user_api_key
-    if not api_key:
-        raise ValueError(f"{provider} API key required")
-    if not model:
-        model = DEFAULT_MODELS.get(provider)
-    if provider == "Groq":
-        groq_client = Groq(api_key=api_key)
-        response = groq_client.chat.completions.create(messages=messages, model=model, stream=False, temperature=0)
-        return response.choices[0].message.content
-    elif provider == "Gemini":
-        genai.configure(api_key=api_key)
-        gemini_model = genai.GenerativeModel(model)
-        response = gemini_model.generate_content(messages[-1]["content"])
-        return response.text
-    elif provider == "HuggingFace":
-        hf_client = InferenceClient(model=model, token=api_key)
-        return hf_client.text_generation(messages[-1]["content"], max_new_tokens=500)
-    elif provider == "Grok":
-        url = "https://api.x.ai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        payload = {"messages": messages, "model": model, "stream": False, "temperature": 0}
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=120)
-                response.raise_for_status()
-                data = response.json()
-                return data.get("choices", [{}])[0].get("message", {}).get("content", "No response")
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Grok API request error: {e}")
-                status_code = None
-                if hasattr(e, 'response') and e.response is not None:
-                    status_code = e.response.status_code
-                if status_code == 503:
-                    logger.error(f"Grok API 503 error: {e}")
-                    if attempt < max_retries - 1:
-                        time.sleep(5)
-                        continue
-                    else:
-                        raise HTTPException(status_code=503, detail="Grok API unavailable after retries")
-                if attempt < max_retries - 1:
-                    time.sleep(5)
-                    continue
-                else:
-                    raise ValueError(f"Grok API request failed after {max_retries} attempts: {str(e)}")
-    raise ValueError("Invalid provider")
 
 @app.post("/register")
 @limiter.limit("5/minute")
